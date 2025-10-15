@@ -1,0 +1,8 @@
+# Исключить папку миграций
+server/prisma/migrations/
+/prisma/migrations/
+/public
+# Также часто исключают эти папки
+node_modules/
+.env
+.idea/
