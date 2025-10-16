@@ -2,12 +2,14 @@ const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 const { validateOrderData, ValidationError } = require('../utills/validation');
 const { createOrderUpdateNotification } = require('../utills/notificationHelpers');
+const { sendOrderNotificationEmail } = require('../utills/emailService');
 
 async function createCustomerOrder(request, response) {
   try {
     console.log("=== ORDER CREATION REQUEST ===");
     console.log("Request body:", JSON.stringify(request.body, null, 2));
-
+    
+    // Validate request body
     if (!request.body || typeof request.body !== 'object') {
       console.log("❌ Invalid request body");
       return response.status(400).json({ 
@@ -16,6 +18,7 @@ async function createCustomerOrder(request, response) {
       });
     }
 
+    // Server-side validation
     const validation = validateOrderData(request.body);
     console.log("Validation result:", validation);
     
@@ -30,6 +33,7 @@ async function createCustomerOrder(request, response) {
     const validatedData = validation.validatedData;
     console.log("✅ Validation passed, validated data:", validatedData);
 
+    // Additional business logic validation
     if (validatedData.total < 0.01) {
       console.log("❌ Invalid total amount");
       return response.status(400).json({
@@ -38,6 +42,7 @@ async function createCustomerOrder(request, response) {
       });
     }
 
+    // Check for duplicate orders (same email and total within last 1 minute) - less strict
     const oneMinuteAgo = new Date(Date.now() - 1 * 60 * 1000);
     const duplicateOrder = await prisma.customer_order.findFirst({
       where: {
@@ -58,6 +63,7 @@ async function createCustomerOrder(request, response) {
     }
 
     console.log("Creating order in database...");
+    // Create the order with validated data
     const corder = await prisma.customer_order.create({
       data: {
         name: validatedData.name,
@@ -79,10 +85,17 @@ async function createCustomerOrder(request, response) {
 
     console.log("✅ Order created successfully:", corder);
     console.log("Order ID:", corder.id);
+    try {
+      await sendOrderNotificationEmail(corder, validatedData.email);
+    } catch (emailError) {
+      console.error("❌ Ошибка при отправке письма админу:", emailError);
+    }
 
+    // Create notification for the user if they have an account
     try {
       let user = null;
-
+      
+      // First, try to use userId if provided (from logged-in user)
       if (request.body.userId) {
         console.log(`🔍 Using provided userId: ${request.body.userId}`);
         user = await prisma.user.findUnique({
@@ -94,7 +107,8 @@ async function createCustomerOrder(request, response) {
           console.log(`❌ User not found with ID: ${request.body.userId}`);
         }
       }
-
+      
+      // Fallback: search by email if no userId or user not found
       if (!user) {
         console.log(`🔍 Searching user by email: ${validatedData.email}`);
         user = await prisma.user.findUnique({
@@ -118,8 +132,10 @@ async function createCustomerOrder(request, response) {
       }
     } catch (notificationError) {
       console.error('❌ Failed to create order notification:', notificationError);
+      // Don't fail the order if notification fails
     }
 
+    // Log successful order creation (for monitoring)
     console.log(`Order created successfully: ID ${corder.id}, Email: ${validatedData.email}, Total: $${validatedData.total}`);
 
     const responseData = {
@@ -142,6 +158,7 @@ async function createCustomerOrder(request, response) {
       });
     }
 
+    // Handle validation errors
     if (error instanceof ValidationError) {
       return response.status(400).json({
         error: "Validation failed",
@@ -149,6 +166,7 @@ async function createCustomerOrder(request, response) {
       });
     }
 
+    // Generic error response
     return response.status(500).json({ 
       error: "Internal server error",
       details: "Failed to create order. Please try again later."
@@ -159,7 +177,8 @@ async function createCustomerOrder(request, response) {
 async function updateCustomerOrder(request, response) {
   try {
     const { id } = request.params;
-
+    
+    // Validate ID format
     if (!id || typeof id !== 'string') {
       return response.status(400).json({
         error: "Invalid order ID",
@@ -167,6 +186,7 @@ async function updateCustomerOrder(request, response) {
       });
     }
 
+    // Validate request body
     if (!request.body || typeof request.body !== 'object') {
       return response.status(400).json({ 
         error: "Invalid request body",
@@ -174,6 +194,7 @@ async function updateCustomerOrder(request, response) {
       });
     }
 
+    // Server-side validation for update data
     const validation = validateOrderData(request.body);
     
     if (!validation.isValid) {
@@ -219,6 +240,7 @@ async function updateCustomerOrder(request, response) {
       },
     });
 
+    // Create notification for status update if status changed
     if (existingOrder.status !== validatedData.status) {
       try {
         const user = await prisma.user.findUnique({
@@ -349,10 +371,12 @@ async function getCustomerOrder(request, response) {
 
 async function getAllOrders(request, response) {
   try {
+    // Add pagination and filtering for better performance
     const page = parseInt(request.query.page) || 1;
     const limit = parseInt(request.query.limit) || 50;
     const offset = (page - 1) * limit;
-
+    
+    // Validate pagination parameters
     if (page < 1 || limit < 1 || limit > 100) {
       return response.status(400).json({
         error: "Invalid pagination parameters",
